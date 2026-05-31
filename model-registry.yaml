@@ -1,0 +1,72 @@
+registry:
+  name: northstar-models
+
+  stages:
+    - name: staging
+      promoted_from: >
+        Successful completion of the evaluation pipeline for a training run.
+        A run is eligible when its evaluation report is attached to the model
+        artifact URI and all gates below pass.
+      promotion_rule: automatic
+      gates:
+        - evaluation_dataset_version_exists: true          # frozen eval set hash must be recorded
+        - dataset_hash_recorded: true                      # SHA-256 of training set in lineage metadata
+        - mae_absolute_minutes_lte: 4.5                    # MAE on frozen eval set ≤ 4.5 minutes
+        - mape_pct_lte: 8.0                                # MAPE on frozen eval set ≤ 8 %
+        - per_region_mae_lte: 6.0                          # worst-region MAE ≤ 6.0 min (bottom 3 regions)
+        - p95_inference_latency_ms_lte: 140                # measured on staging load test, ≤ 140 ms (under SLA)
+        - model_artifact_checksum_present: true            # SHA-256 of .onnx file stored in registry
+        - no_critical_schema_validation_failures: true     # feature schema version matches training schema
+
+    - name: production
+      promoted_from: staging
+      promotion_rule: manual
+      gates:
+        - staging_soak_period_hours_gte: 24                # model must sit in staging ≥ 24 h
+        - canary_error_rate_pct_lte: 0.5                   # canary at 5 % traffic, error rate ≤ 0.5 %
+        - canary_p95_latency_ms_lte: 150                   # canary p95 latency ≤ 150 ms (at SLA)
+        - canary_mae_vs_champion_delta_lte: 0.5            # canary MAE within 0.5 min of current production
+        - per_city_f1_bottom3_gte: 0.70                    # Derived late/on-time classification from ETA threshold; slice metric across bottom-3 cities F1 ≥ 0.70
+        - macro_f1_on_late_delivery_class_gte: 0.82        # Derived late/on-time classification from ETA threshold; macro F1 on binary late/on-time class ≥ 0.82
+        - no_open_severity_1_incidents: true               # no unresolved P1 issues tied to this version
+      approvers:
+        - ml-lead
+        - platform-owner
+
+    - name: archived
+      promoted_from: >
+        A production model version is archived automatically when a newer
+        version successfully completes promotion to production, or when an
+        ml-lead explicitly marks a version as deprecated (e.g. after a
+        rollback event).
+
+models:
+  - name: eta
+    owner: ml-platform-team
+    inference_pattern: online
+    rps_p95: 200
+    retrain_cadence: every_2_weeks
+    sla_p95_ms: 150
+    retention_versions: 10
+    alert_on_drift: true
+    drift_check_window_hours: 6
+
+  - name: dispatcher-routing
+    owner: logistics-ml-team
+    inference_pattern: online
+    rps_p95: 50
+    retrain_cadence: monthly
+    sla_p95_ms: 80
+    retention_versions: 10
+    alert_on_drift: true
+    drift_check_window_hours: 12
+
+lineage:
+  required_fields:
+    - git_sha               # exact commit that produced the training code
+    - dataset_hash          # SHA-256 of the training dataset snapshot
+    - training_run_id       # MLflow run ID, links to all logged metrics and params
+    - feature_schema_version  # semver of the feature schema used at training time
+    - model_artifact_uri    # fully-qualified S3 URI of the .onnx artifact
+    - environment_image_digest  # Docker image digest (sha256:…) of the training container
+    - random_seed           # integer seed passed to all RNG calls during training
